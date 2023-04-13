@@ -17,7 +17,7 @@ def create_model(
     device='cpu'
 ):
 
-    if 'mdn_kwargs' in model_params:
+    if model_params['enable_mdn']:
         model_out_dim = model_params['mdn_kwargs']['model_out_dim']
     else:
         model_out_dim = out_dim
@@ -26,7 +26,7 @@ def create_model(
         model = FCN(
             in_dim=in_dim,
             in_channels=in_channels,
-            out_dim=out_dim,
+            out_dim=model_out_dim,
             **model_params['model_kwargs']
         ).to(device)
         model.apply(weights_init_normal)
@@ -67,7 +67,7 @@ def create_model(
     else:
         raise ValueError('Incorrect model_type specified:  %s' % (model_params['model_type'],))
 
-    if 'mdn_kwargs' in model_params:
+    if model_params['enable_mdn']:
         model = MDNHead(
             model=model,
             out_dim=out_dim,
@@ -492,7 +492,7 @@ class MDNHead(nn.Module):
         pred_mean = torch.sum(pi.unsqueeze(dim=-1) * mu, dim=1)
         pred_stddev = torch.sqrt(torch.sum(pi.unsqueeze(dim=-1) * (sigma**2 + mu**2), dim=1) - pred_mean**2).squeeze()
         if deterministic:
-            return pred_mean, pred_stddev
+            return pred_mean
         else:
             pi_distribution = Normal(pred_mean, pred_stddev)
             return pi_distribution.rsample()

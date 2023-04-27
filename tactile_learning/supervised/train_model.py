@@ -11,11 +11,12 @@ def train_model(
     val_generator,
     learning_params,
     save_dir,
+    init_dir=None,
     error_plotter=None,
     calculate_train_metrics=False,
     device='cpu'
 ):
-
+    print(init_dir)
     if 'MDNHead' in str(type(model)):
         val_loss, train_time = train_mdn_model(
             prediction_mode,

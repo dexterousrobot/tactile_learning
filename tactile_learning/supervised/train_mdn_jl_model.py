@@ -19,7 +19,7 @@ def train_mdn_jl_model(
     val_generator,
     learning_params,
     save_dir,
-    init_dir,
+    init_dir=None,
     device='cpu'
 ):
     # load pre-trained model weights if specified

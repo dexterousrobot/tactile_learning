@@ -7,6 +7,12 @@ from pytorch_model_summary import summary
 from vit_pytorch.vit import ViT
 
 
+def softbound(x, x_min, x_max):
+    return (torch.log1p(torch.exp(-torch.abs(x - x_min)))  \
+        - torch.log1p(torch.exp(-torch.abs(x - x_max)))) \
+        + torch.maximum(x, x_min) + torch.minimum(x, x_max) - x
+
+
 def create_model(
     in_dim,
     in_channels,
@@ -64,6 +70,15 @@ def create_model(
             num_classes=model_out_dim,
             **model_params['model_kwargs']
         ).to(device)
+
+    elif model_params['model_type'] in ['cnn_mdn_jl', 'cnn_mdn_jl_pretrain']:
+        model = MDN_JL(
+            in_dim=in_dim,
+            in_channels=in_channels,
+            out_dim=model_out_dim,
+            **model_params['model_kwargs']
+        ).to(device)
+
     else:
         raise ValueError('Incorrect model_type specified:  %s' % (model_params['model_type'],))
 
@@ -483,7 +498,7 @@ class MDNHead(nn.Module):
         loglik = torch.logsumexp(log_pi + normal_loglik, dim=-1)
         return -loglik
 
-    def sample(self, x, deterministic=True):
+    def predict(self, x, deterministic=True):
         """
         Samples from the predicted distribution.
         """
@@ -496,3 +511,125 @@ class MDNHead(nn.Module):
         else:
             pi_distribution = Normal(pred_mean, pred_stddev)
             return pi_distribution.rsample()
+
+class MDN_JL(nn.Module):
+    def __init__(
+        self,
+        in_dim,
+        in_channels,
+        out_dim,
+        conv_filters,
+        conv_kernel_sizes,
+        conv_padding,
+        conv_batch_norm,
+        conv_activation,
+        conv_pool_size,
+        fc_units,
+        fc_activation,
+        fc_dropout,
+        mix_components,
+        pi_dropout,
+        mu_dropout,
+        sigma_inv_dropout,
+        mu_min,
+        mu_max,
+        sigma_inv_min,
+        sigma_inv_max,
+    ):
+        super(MDN_JL, self).__init__()
+
+        self.in_dim, self.in_channels, self.out_dim, self.mix_components = \
+            torch.tensor(in_dim), torch.tensor(in_channels), torch.tensor(out_dim), torch.tensor(mix_components)
+        self.mu_min, self.mu_max, self.sigma_inv_min, self.sigma_inv_max = \
+            torch.tensor(mu_min), torch.tensor(mu_max), torch.tensor(sigma_inv_min), torch.tensor(sigma_inv_max)
+
+        activ_modules = {'relu': nn.ReLU, 'elu': nn.ELU}
+
+        # convolutional base
+        conv_modules = []
+        for i in range(len(conv_filters)):
+            conv_modules.append(
+                nn.Conv2d(
+                    in_channels=in_channels if i == 0 else conv_filters[i - 1],
+                    out_channels=conv_filters[i],
+                    kernel_size=conv_kernel_sizes[i],
+                    padding=conv_padding)
+            )
+            if conv_batch_norm:
+                conv_modules.append(nn.BatchNorm2d(conv_filters[i]))
+            conv_modules.append(activ_modules[conv_activation]())
+            conv_modules.append(nn.MaxPool2d(kernel_size=conv_pool_size, stride=conv_pool_size))
+        self.conv_base = nn.Sequential(*conv_modules)
+
+        # compute number of conv base outputs by doing one forward pass
+        with torch.no_grad():
+            dummy_input = torch.zeros((1, in_channels, *in_dim))
+            conv_base_outputs = np.prod(self.conv_base(dummy_input).shape)
+
+        # shared fc layers
+        fc_modules = []
+        for i in range(len(fc_units)):
+            if fc_dropout > 0:
+                fc_modules.append(nn.Dropout(fc_dropout))
+            fc_modules.append(nn.Linear(conv_base_outputs if i == 0 else fc_units[i - 1], fc_units[i]))
+            fc_modules.append(activ_modules[fc_activation]())
+        self.fc_hidden = nn.Sequential(*fc_modules)
+
+        fc_hidden_outputs = fc_units[-1] if len(fc_units) > 0 else conv_base_outputs
+
+        # mixture weights
+        pi_modules = []
+        pi_modules.append(nn.Dropout(pi_dropout))
+        pi_modules.append(nn.Linear(fc_hidden_outputs, mix_components))
+        pi_modules.append(nn.Softmax(dim=-1))
+        self.pi_head = nn.Sequential(*pi_modules)
+
+        # component means and (inverse) stdevs
+        self.mu_heads, self.sigma_inv_heads = [], []
+        for i in range(out_dim):
+            mu_modules_i = []
+            mu_modules_i.append(nn.Dropout(mu_dropout[i]))
+            mu_modules_i.append(nn.Linear(fc_hidden_outputs, mix_components))
+            self.mu_heads.append(nn.Sequential(*mu_modules_i))
+
+            sigma_inv_modules_i = []
+            sigma_inv_modules_i.append(nn.Dropout(sigma_inv_dropout[i]))
+            sigma_inv_modules_i.append(nn.Linear(fc_hidden_outputs, mix_components))
+            self.sigma_inv_heads.append(nn.Sequential(*sigma_inv_modules_i))
+        self.mu_heads, self.sigma_inv_heads = nn.ModuleList(self.mu_heads), nn.ModuleList(self.sigma_inv_heads)
+
+    def _apply(self, fn):
+        super(MDN_JL, self)._apply(fn)
+        self.in_dim, self.in_channels, self.out_dim, self.mix_components = \
+            fn(self.in_dim), fn(self.in_channels), fn(self.out_dim), fn(self.mix_components)
+        self.mu_min, self.mu_max, self.sigma_inv_min, self.sigma_inv_max = \
+            fn(self.mu_min), fn(self.mu_max), fn(self.sigma_inv_min), fn(self.sigma_inv_max)
+        return self
+
+    def forward(self, x):
+        x = self.conv_base(x)
+        x = x.reshape(x.shape[0], -1)
+        x = self.fc_hidden(x)
+        pi = self.pi_head(x)
+        mu, sigma_inv = [], []
+        for i in range(self.out_dim):
+            mu.append(softbound(self.mu_heads[i](x), self.mu_min[i], self.mu_max[i]))
+            sigma_inv.append(softbound(self.sigma_inv_heads[i](x), self.sigma_inv_min[i], self.sigma_inv_max[i]))
+        mu, sigma_inv = torch.stack(mu, dim=2), torch.stack(sigma_inv, dim=2)
+        return pi, mu, sigma_inv
+
+    def loss(self, x, y):
+        pi, mu, sigma_inv = self.forward(x)
+        squared_err = torch.sum(torch.square((torch.unsqueeze(y, dim=1) - mu) * sigma_inv), dim=2)
+        log_pdf_comp = - (squared_err / 2) - (self.out_dim * np.log(2 * np.pi) / 2) \
+                       + torch.sum(torch.log(sigma_inv), dim=2)
+        log_pdf = torch.logsumexp(torch.log(pi) + log_pdf_comp, dim=-1)
+        nll = -torch.mean(log_pdf)
+        return nll
+
+    def predict(self, x):
+        pi, mu, sigma_inv = self.forward(x)
+        pred_mean = torch.sum(pi.unsqueeze(dim=-1) * mu, dim=1)
+        pred_stddev = torch.sqrt(torch.sum(pi.unsqueeze(dim=-1) * (1/(sigma_inv**2) + mu**2), dim=1)
+                                 - pred_mean**2).squeeze()
+        return pred_mean, pred_stddev

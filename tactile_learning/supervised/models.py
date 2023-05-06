@@ -7,6 +7,12 @@ from pytorch_model_summary import summary
 from vit_pytorch.vit import ViT
 
 
+def softbound(x, x_min, x_max):
+    return (torch.log1p(torch.exp(-torch.abs(x - x_min)))
+            - torch.log1p(torch.exp(-torch.abs(x - x_max)))) \
+        + torch.maximum(x, x_min) + torch.minimum(x, x_max) - x
+
+
 def create_model(
     in_dim,
     in_channels,
@@ -17,21 +23,21 @@ def create_model(
     device='cpu'
 ):
 
-    if model_params['enable_mdn']:
+    if 'mdn' in model_params['model_type']:
         model_out_dim = model_params['mdn_kwargs']['model_out_dim']
     else:
         model_out_dim = out_dim
 
-    if model_params['model_type'] in ['fcn']:
+    if 'fcn' in model_params['model_type']:
         model = FCN(
             in_dim=in_dim,
             in_channels=in_channels,
-            out_dim=model_out_dim,
+            out_dim=out_dim,
             **model_params['model_kwargs']
         ).to(device)
         model.apply(weights_init_normal)
 
-    elif model_params['model_type'] in ['simple_cnn', 'posenet_cnn']:
+    elif 'simple_cnn' in model_params['model_type']:
         model = CNN(
             in_dim=in_dim,
             in_channels=in_channels,
@@ -40,7 +46,16 @@ def create_model(
         ).to(device)
         model.apply(weights_init_normal)
 
-    elif model_params['model_type'] == 'nature_cnn':
+    elif 'posenet_cnn' in model_params['model_type']:
+        model = CNN(
+            in_dim=in_dim,
+            in_channels=in_channels,
+            out_dim=model_out_dim,
+            **model_params['model_kwargs']
+        ).to(device)
+        model.apply(weights_init_normal)
+
+    elif 'nature_cnn' in model_params['model_type']:
         model = NatureCNN(
             in_dim=in_dim,
             in_channels=in_channels,
@@ -49,7 +64,7 @@ def create_model(
         ).to(device)
         model.apply(weights_init_normal)
 
-    elif model_params['model_type'] == 'resnet':
+    elif 'resnet' in model_params['model_type']:
         model = ResNet(
             ResidualBlock,
             in_channels=in_channels,
@@ -57,18 +72,26 @@ def create_model(
             **model_params['model_kwargs'],
         ).to(device)
 
-    elif model_params['model_type'] == 'vit':
+    elif 'vit' in model_params['model_type']:
         model = ViT(
             image_size=in_dim[0],
             channels=in_channels,
             num_classes=model_out_dim,
             **model_params['model_kwargs']
         ).to(device)
+
     else:
         raise ValueError('Incorrect model_type specified:  %s' % (model_params['model_type'],))
 
-    if model_params['enable_mdn']:
-        model = MDNHead(
+    if 'mdn_ac' in model_params['model_type']:
+        model = MDN_AC(
+            model=model,
+            out_dim=out_dim,
+            **model_params['mdn_kwargs']
+        ).to(device)
+
+    elif 'mdn_jl' in model_params['model_type']:
+        model = MDN_JL(
             model=model,
             out_dim=out_dim,
             **model_params['mdn_kwargs']
@@ -84,6 +107,7 @@ def create_model(
             dummy_input = torch.zeros((1, in_dim)).to(device)
         else:
             dummy_input = torch.zeros((1, in_channels, *in_dim)).to(device)
+
         print(summary(
             model,
             dummy_input,
@@ -352,7 +376,7 @@ class ResNet(nn.Module):
         return x
 
 
-class MDNHead(nn.Module):
+class MDN_AC(nn.Module):
     """
     Implementation of Mixture Density Networks in Pytorch from
 
@@ -378,7 +402,7 @@ class MDNHead(nn.Module):
         noise_type='diagonal',
         fixed_noise_level=None
     ):
-        super(MDNHead, self).__init__()
+        super(MDN_AC, self).__init__()
 
         assert (fixed_noise_level is not None) == (noise_type == 'fixed')
 
@@ -426,22 +450,6 @@ class MDNHead(nn.Module):
         self.pi_network = nn.Sequential(*pi_network_modules)
         self.normal_network = nn.Sequential(*normal_network_modules)
 
-        # self.pi_network = nn.Sequential(
-        #     model,
-        #     nn.ReLU(),
-        #     nn.Linear(out_dim, hidden_dim),
-        #     nn.ReLU(),
-        #     nn.Linear(hidden_dim, n_mdn_components),
-        # )
-        #
-        # self.normal_network = nn.Sequential(
-        #     model,
-        #     nn.ReLU(),
-        #     nn.Linear(out_dim, hidden_dim),
-        #     nn.ReLU(),
-        #     nn.Linear(hidden_dim, out_dim * n_mdn_components + num_sigma_channels)
-        # )
-
     def forward(self, x, eps=1e-6):
         """
         Returns
@@ -483,6 +491,16 @@ class MDNHead(nn.Module):
         loglik = torch.logsumexp(log_pi + normal_loglik, dim=-1)
         return -loglik
 
+    def predict(self, x, deterministic=True):
+        """
+        Samples from the predicted distribution.
+        """
+        log_pi, mu, sigma = self.forward(x)
+        pi = torch.exp(log_pi)
+        pred_mean = torch.sum(pi.unsqueeze(dim=-1) * mu, dim=1)
+        pred_stddev = torch.sqrt(torch.sum(pi.unsqueeze(dim=-1) * (sigma**2 + mu**2), dim=1) - pred_mean**2).squeeze()
+        return pred_mean, pred_stddev
+
     def sample(self, x, deterministic=True):
         """
         Samples from the predicted distribution.
@@ -496,3 +514,81 @@ class MDNHead(nn.Module):
         else:
             pi_distribution = Normal(pred_mean, pred_stddev)
             return pi_distribution.rsample()
+
+
+class MDN_JL(nn.Module):
+    def __init__(
+        self,
+        model,
+        out_dim,
+        model_out_dim,
+        mix_components,
+        pi_dropout,
+        mu_dropout,
+        sigma_inv_dropout,
+        mu_min,
+        mu_max,
+        sigma_inv_min,
+        sigma_inv_max,
+    ):
+        super(MDN_JL, self).__init__()
+
+        self.out_dim, self.mix_components = torch.tensor(out_dim), torch.tensor(mix_components)
+        self.mu_min, self.mu_max, self.sigma_inv_min, self.sigma_inv_max = \
+            torch.tensor(mu_min), torch.tensor(mu_max), torch.tensor(sigma_inv_min), torch.tensor(sigma_inv_max)
+
+        self.base_model = model
+
+        # mixture weights
+        pi_modules = []
+        pi_modules.append(nn.Dropout(pi_dropout))
+        pi_modules.append(nn.Linear(model_out_dim, mix_components))
+        pi_modules.append(nn.Softmax(dim=-1))
+        self.pi_head = nn.Sequential(*pi_modules)
+
+        # component means and (inverse) stdevs
+        self.mu_heads, self.sigma_inv_heads = [], []
+        for i in range(out_dim):
+            mu_modules_i = []
+            mu_modules_i.append(nn.Dropout(mu_dropout[i]))
+            mu_modules_i.append(nn.Linear(model_out_dim, mix_components))
+            self.mu_heads.append(nn.Sequential(*mu_modules_i))
+
+            sigma_inv_modules_i = []
+            sigma_inv_modules_i.append(nn.Dropout(sigma_inv_dropout[i]))
+            sigma_inv_modules_i.append(nn.Linear(model_out_dim, mix_components))
+            self.sigma_inv_heads.append(nn.Sequential(*sigma_inv_modules_i))
+        self.mu_heads, self.sigma_inv_heads = nn.ModuleList(self.mu_heads), nn.ModuleList(self.sigma_inv_heads)
+
+    def _apply(self, fn):
+        super(MDN_JL, self)._apply(fn)
+        self.out_dim, self.mix_components = fn(self.out_dim), fn(self.mix_components)
+        self.mu_min, self.mu_max, self.sigma_inv_min, self.sigma_inv_max = \
+            fn(self.mu_min), fn(self.mu_max), fn(self.sigma_inv_min), fn(self.sigma_inv_max)
+        return self
+
+    def forward(self, x):
+        x = self.base_model(x)
+        pi = self.pi_head(x)
+        mu, sigma_inv = [], []
+        for i in range(self.out_dim):
+            mu.append(softbound(self.mu_heads[i](x), self.mu_min[i], self.mu_max[i]))
+            sigma_inv.append(softbound(self.sigma_inv_heads[i](x), self.sigma_inv_min[i], self.sigma_inv_max[i]))
+        mu, sigma_inv = torch.stack(mu, dim=2), torch.stack(sigma_inv, dim=2)
+        return pi, mu, sigma_inv
+
+    def loss(self, x, y):
+        pi, mu, sigma_inv = self.forward(x)
+        squared_err = torch.sum(torch.square((torch.unsqueeze(y, dim=1) - mu) * sigma_inv), dim=2)
+        log_pdf_comp = - (squared_err / 2) - (self.out_dim * np.log(2 * np.pi) / 2) \
+            + torch.sum(torch.log(sigma_inv), dim=2)
+        log_pdf = torch.logsumexp(torch.log(pi) + log_pdf_comp, dim=-1)
+        nll = -torch.mean(log_pdf)
+        return nll
+
+    def predict(self, x):
+        pi, mu, sigma_inv = self.forward(x)
+        pred_mean = torch.sum(pi.unsqueeze(dim=-1) * mu, dim=1)
+        pred_stddev = torch.sqrt(torch.sum(pi.unsqueeze(dim=-1) * (1/(sigma_inv**2) + mu**2), dim=1)
+                                 - pred_mean**2).squeeze()
+        return pred_mean, pred_stddev

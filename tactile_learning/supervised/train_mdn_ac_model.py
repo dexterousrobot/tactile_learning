@@ -11,7 +11,7 @@ from tactile_learning.utils.utils_learning import get_lr
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 
-def train_mdn_model(
+def train_mdn_ac_model(
     prediction_mode,
     model,
     label_encoder,
@@ -138,12 +138,6 @@ def train_mdn_model(
             writer.add_scalar('accuracy/train', np.mean(train_epoch_acc), epoch)
             writer.add_scalar('accuracy/val', np.mean(val_epoch_acc), epoch)
             writer.add_scalar('learning_rate', get_lr(optimizer), epoch)
-
-            # track weights on tensorboard
-            # for name, weight in model.named_parameters():
-            #     full_name = f'{os.path.basename(os.path.normpath(save_dir))}/{name}'
-            #     writer.add_histogram(full_name, weight, epoch)
-            #     writer.add_histogram(f'{full_name}.grad', weight.grad, epoch)
 
             # save the model with lowest val loss
             if np.mean(val_epoch_loss) < lowest_val_loss:

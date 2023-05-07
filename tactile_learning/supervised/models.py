@@ -522,7 +522,7 @@ class MDN_JL(nn.Module):
         model,
         out_dim,
         model_out_dim,
-        mix_components,
+        n_mdn_components,
         pi_dropout,
         mu_dropout,
         sigma_inv_dropout,
@@ -533,7 +533,7 @@ class MDN_JL(nn.Module):
     ):
         super(MDN_JL, self).__init__()
 
-        self.out_dim, self.mix_components = torch.tensor(out_dim), torch.tensor(mix_components)
+        self.out_dim, self.n_mdn_components = torch.tensor(out_dim), torch.tensor(n_mdn_components)
         self.mu_min, self.mu_max, self.sigma_inv_min, self.sigma_inv_max = \
             torch.tensor(mu_min), torch.tensor(mu_max), torch.tensor(sigma_inv_min), torch.tensor(sigma_inv_max)
 
@@ -542,7 +542,7 @@ class MDN_JL(nn.Module):
         # mixture weights
         pi_modules = []
         pi_modules.append(nn.Dropout(pi_dropout))
-        pi_modules.append(nn.Linear(model_out_dim, mix_components))
+        pi_modules.append(nn.Linear(model_out_dim, n_mdn_components))
         pi_modules.append(nn.Softmax(dim=-1))
         self.pi_head = nn.Sequential(*pi_modules)
 
@@ -551,18 +551,18 @@ class MDN_JL(nn.Module):
         for i in range(out_dim):
             mu_modules_i = []
             mu_modules_i.append(nn.Dropout(mu_dropout[i]))
-            mu_modules_i.append(nn.Linear(model_out_dim, mix_components))
+            mu_modules_i.append(nn.Linear(model_out_dim, n_mdn_components))
             self.mu_heads.append(nn.Sequential(*mu_modules_i))
 
             sigma_inv_modules_i = []
             sigma_inv_modules_i.append(nn.Dropout(sigma_inv_dropout[i]))
-            sigma_inv_modules_i.append(nn.Linear(model_out_dim, mix_components))
+            sigma_inv_modules_i.append(nn.Linear(model_out_dim, n_mdn_components))
             self.sigma_inv_heads.append(nn.Sequential(*sigma_inv_modules_i))
         self.mu_heads, self.sigma_inv_heads = nn.ModuleList(self.mu_heads), nn.ModuleList(self.sigma_inv_heads)
 
     def _apply(self, fn):
         super(MDN_JL, self)._apply(fn)
-        self.out_dim, self.mix_components = fn(self.out_dim), fn(self.mix_components)
+        self.out_dim, self.n_mdn_components = fn(self.out_dim), fn(self.n_mdn_components)
         self.mu_min, self.mu_max, self.sigma_inv_min, self.sigma_inv_max = \
             fn(self.mu_min), fn(self.mu_max), fn(self.sigma_inv_min), fn(self.sigma_inv_max)
         return self

@@ -55,7 +55,7 @@ def train_mdn_model(
         )
 
     elif 'lr' in learning_params:
-        optimizer.lr = learning_params('lr')
+        optimizer.lr = learning_params['lr']
         optimizer.betas = (learning_params.get("adam_b1", None), learning_params.get("adam_b2", None))
         optimizer.weight_decay = learning_params.get('adam_decay', None)
         lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(

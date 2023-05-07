@@ -2,7 +2,6 @@ from tactile_learning.supervised.simple_train_model import simple_train_model
 from tactile_learning.supervised.train_model_w_metrics import train_model_w_metrics
 from tactile_learning.supervised.train_mdn_model import train_mdn_model
 
-
 def train_model(
     prediction_mode,
     model,
@@ -16,7 +15,7 @@ def train_model(
     device='cpu'
 ):
 
-    if 'MDNHead' in str(type(model)):
+    if model.__class__.__name__ in ['MDN_JL', 'MDN_AC']:
         val_loss, train_time = train_mdn_model(
             prediction_mode,
             model,

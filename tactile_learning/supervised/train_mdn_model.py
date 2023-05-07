@@ -21,7 +21,6 @@ def train_mdn_model(
     save_dir,
     device='cpu'
 ):
-
     # tensorboard writer for tracking vars
     writer = SummaryWriter(os.path.join(save_dir, 'tensorboard_runs'))
 
@@ -43,19 +42,28 @@ def train_mdn_model(
     n_val_batches = len(val_loader)
 
     # define optimizer
-    optimizer = optim.Adam(
-        model.parameters(),
-        lr=learning_params['lr'],
-        betas=(learning_params["adam_b1"], learning_params["adam_b2"]),
-        weight_decay=learning_params['adam_decay']
-    )
+    optimizer = optim.Adam(model.parameters())
 
-    lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        factor=learning_params['lr_factor'],
-        patience=learning_params['lr_patience'],
-        verbose=True
-    )
+    if 'cyclic_base_lr' in learning_params:
+        lr_scheduler = optim.lr_scheduler.CyclicLR(
+            optimizer,
+            base_lr=learning_params['cyclic_base_lr'],
+            max_lr=learning_params['cyclic_max_lr'],
+            step_size_up=learning_params['cyclic_half_period'] * n_train_batches,
+            mode=learning_params['cyclic_mode'],
+            cycle_momentum=False
+        )
+
+    elif 'lr' in learning_params:
+        optimizer.lr = learning_params('lr')
+        optimizer.betas = (learning_params.get("adam_b1", None), learning_params.get("adam_b2", None))
+        optimizer.weight_decay = learning_params.get('adam_decay', None)
+        lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            factor=learning_params.get('lr_factor', None),
+            patience=learning_params.get('lr_patience', None),
+            verbose=True
+        )
 
     def run_epoch(loader, n_batches, training=True):
 
@@ -85,6 +93,8 @@ def train_mdn_model(
             if training:
                 loss_size.backward()
                 optimizer.step()
+                if 'cyclic_base_lr' in learning_params:
+                    lr_scheduler.step()
 
         return epoch_batch_loss, epoch_batch_acc
 
@@ -139,12 +149,6 @@ def train_mdn_model(
             writer.add_scalar('accuracy/val', np.mean(val_epoch_acc), epoch)
             writer.add_scalar('learning_rate', get_lr(optimizer), epoch)
 
-            # track weights on tensorboard
-            # for name, weight in model.named_parameters():
-            #     full_name = f'{os.path.basename(os.path.normpath(save_dir))}/{name}'
-            #     writer.add_histogram(full_name, weight, epoch)
-            #     writer.add_histogram(f'{full_name}.grad', weight.grad, epoch)
-
             # save the model with lowest val loss
             if np.mean(val_epoch_loss) < lowest_val_loss:
                 lowest_val_loss = np.mean(val_epoch_loss)
@@ -156,7 +160,8 @@ def train_mdn_model(
                 )
 
             # decay the lr
-            lr_scheduler.step(np.mean(val_epoch_loss))
+            if 'lr' in learning_params:
+                lr_scheduler.step(np.mean(val_epoch_loss))
 
             # update epoch progress bar
             pbar.update(1)

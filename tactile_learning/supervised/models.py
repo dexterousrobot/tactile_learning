@@ -5,6 +5,8 @@ import torch.nn as nn
 from pytorch_model_summary import summary
 from vit_pytorch.vit import ViT
 
+from tactile_learning.supervised.models_mdn import MDN_AC, MDN_JL
+
 
 def create_model(
     in_dim,
@@ -16,7 +18,13 @@ def create_model(
     device='cpu'
 ):
 
-    if model_params['model_type'] in ['fcn']:
+    # for mdn head, base layers have model_out_dim
+    if '_mdn' in model_params['model_type']:
+        mdn_out_dim = out_dim
+        out_dim = model_params['mdn_kwargs']['model_out_dim']
+
+    # set up models
+    if 'fcn' in model_params['model_type']:
         model = FCN(
             in_dim=in_dim,
             in_channels=in_channels,
@@ -25,7 +33,7 @@ def create_model(
         ).to(device)
         model.apply(weights_init_normal)
 
-    elif model_params['model_type'] in ['simple_cnn', 'posenet_cnn']:
+    elif 'simple_cnn' in model_params['model_type']:
         model = CNN(
             in_dim=in_dim,
             in_channels=in_channels,
@@ -34,7 +42,16 @@ def create_model(
         ).to(device)
         model.apply(weights_init_normal)
 
-    elif model_params['model_type'] == 'nature_cnn':
+    elif 'posenet_cnn' in model_params['model_type']:
+        model = CNN(
+            in_dim=in_dim,
+            in_channels=in_channels,
+            out_dim=out_dim,
+            **model_params['model_kwargs']
+        ).to(device)
+        model.apply(weights_init_normal)
+
+    elif 'nature_cnn' in model_params['model_type']:
         model = NatureCNN(
             in_dim=in_dim,
             in_channels=in_channels,
@@ -43,7 +60,7 @@ def create_model(
         ).to(device)
         model.apply(weights_init_normal)
 
-    elif model_params['model_type'] == 'resnet':
+    elif 'resnet' in model_params['model_type']:
         model = ResNet(
             ResidualBlock,
             in_channels=in_channels,
@@ -51,16 +68,30 @@ def create_model(
             **model_params['model_kwargs'],
         ).to(device)
 
-    elif model_params['model_type'] == 'vit':
+    elif 'vit' in model_params['model_type']:
         model = ViT(
             image_size=in_dim[0],
             channels=in_channels,
             num_classes=out_dim,
             **model_params['model_kwargs']
         ).to(device)
-        
+
     else:
         raise ValueError('Incorrect model_type specified:  %s' % (model_params['model_type'],))
+
+    if '_mdn_ac' in model_params['model_type']:
+        model = MDN_AC(
+            model=model,
+            out_dim=mdn_out_dim,
+            **model_params['mdn_kwargs']
+        ).to(device)
+
+    elif '_mdn_jl' in model_params['model_type']:
+        model = MDN_JL(
+            model=model,
+            out_dim=mdn_out_dim,
+            **model_params['mdn_kwargs']
+        ).to(device)
 
     if saved_model_dir is not None:
         model.load_state_dict(torch.load(os.path.join(
@@ -72,6 +103,7 @@ def create_model(
             dummy_input = torch.zeros((1, in_dim)).to(device)
         else:
             dummy_input = torch.zeros((1, in_channels, *in_dim)).to(device)
+
         print(summary(
             model,
             dummy_input,

@@ -1,5 +1,5 @@
 from tactile_learning.supervised.simple_train_model import simple_train_model
-from tactile_learning.supervised.train_model_w_metrics import train_model_w_metrics
+from tactile_learning.supervised.train_mdn_model import train_mdn_model
 
 
 def train_model(
@@ -10,13 +10,11 @@ def train_model(
     val_generator,
     learning_params,
     save_dir,
-    error_plotter=None,
-    calculate_train_metrics=False,
     device='cpu'
 ):
 
-    if error_plotter or calculate_train_metrics:
-        val_loss, train_time = train_model_w_metrics(
+    if model.__class__.__name__ in ['MDN_JL', 'MDN_AC']:
+        val_loss, train_time = train_mdn_model(
             prediction_mode,
             model,
             label_encoder,
@@ -24,8 +22,6 @@ def train_model(
             val_generator,
             learning_params,
             save_dir,
-            error_plotter,
-            calculate_train_metrics,
             device=device
         )
 
